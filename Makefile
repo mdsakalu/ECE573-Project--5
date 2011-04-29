@@ -12,7 +12,7 @@
 .PHONY: default clean
 
 #### some variable definitions
-obj-m := tcache.o
+obj-m := kcache.o
 ksocket_tcp_srv-objs := ../ksocket-0.0.2/ksocket.o
 KDIR  := /lib/modules/$(shell uname -r)/build
 PWD   := $(shell pwd)
