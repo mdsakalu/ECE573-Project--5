@@ -103,13 +103,9 @@ quit:
 }
 
 //incoming hook
-unsigned int in_hook(
-	unsigned int hooknum,
-	struct sk_buff *skb,
-	const struct net_device *in,
-	const struct net_device *out,
-	int (*okfn)(struct sk_buff*))
+unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff*))
 {
+    struct sk_buff *skb = *sb;
 	struct iphdr *iph;
 	struct tcphdr *tcph;
 	unsigned int len;
@@ -139,12 +135,7 @@ unsigned int in_hook(
 			//checksum tcp header
 			len = skb->len;
 			tcph->check = 0;
-			tcph->check = tcp_v4_check(
-				len - 4*iph->ihl,
-				iph->saddr,
-				iph->daddr,
-				csum_partial((char *)tcph, len-4*iph->ihl, 0)
-			);
+            tcph->check = tcp_v4_check(tcph, len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));
 		}
 	}
 
@@ -157,7 +148,7 @@ static int __init init(void)
 	//configure NF_IP_PRE_ROUTING struct and register hook
 	netfilter_ops_in.hook = in_hook;
 	netfilter_ops_in.pf = PF_INET;                              
-	netfilter_ops_in.hooknum = NF_INET_PRE_ROUTING;                 
+	netfilter_ops_in.hooknum = NF_IP_PRE_ROUTING;//NF_INET_PRE_ROUTING;                 
 	netfilter_ops_in.priority = NF_IP_PRI_FIRST;                    
 	nf_register_hook(&netfilter_ops_in);     
 
