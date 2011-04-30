@@ -20,7 +20,12 @@
 #include <linux/file.h>
 #include <net/ksocket.h>
 
+#define PKT_INFO(iph, tcph) NIPQUAD (iph->saddr), ntohs(tcph->source), NIPQUAD(iph->daddr), ntohs(tcph->dest)
+#define PKT_INFO_FMT "(src: " NIPQUAD_FMT ":%u, dst: " NIPQUAD_FMT ":%u)"
+
 #define MAX_REQUEST_LEN 512
+
+#define SOURCE_PORT 8082
 
 static struct nf_hook_ops netfilter_ops_in;
 
@@ -70,7 +75,7 @@ int entry(void)
     memset(&addr_cli, 0, sizeof(addr_cli));
     memset(&addr_srv, 0, sizeof(addr_srv));
     addr_srv.sin_family = AF_INET;
-    addr_srv.sin_port = htons(80);
+    addr_srv.sin_port = htons(SOURCE_PORT);
     addr_srv.sin_addr.s_addr = INADDR_ANY;
     addr_len = sizeof(struct sockaddr_in);
 
@@ -91,7 +96,7 @@ int entry(void)
     // accept connections until it kthread_should_stop() tells us not to
     while ((sockfd_cli = kaccept(sockfd_srv, (struct sockaddr *)&addr_cli, &addr_len)) != NULL) {
         tmp = inet_ntoa(&addr_cli.sin_addr);
-        //printk("Client connected from %s:%d.\n", tmp, ntohs(addr_cli.sin_port));
+        printk("Client connected from %s:%d.\n", tmp, ntohs(addr_cli.sin_port));
         kfree(tmp);
         
         kthread_run(conn_handler, sockfd_cli, "httpcon");
@@ -110,7 +115,7 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 	struct tcphdr *tcph;
 	unsigned int len;
 	
-	printk("in hook called\n");
+	//printk("in hook called\n");
 	if (!skb) return NF_ACCEPT;
 
 	iph = ip_hdr(skb);
@@ -118,15 +123,18 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 
 	if (iph->protocol==IPPROTO_TCP){
 		tcph = (struct tcphdr *)&(((char*)iph)[iph->ihl*4]);
-		printk("got a TCP packet, dest port %d\n", ntohs(tcph->dest));
+
+		//printk("got a TCP packet, dest port %d\n", ntohs(tcph->dest));
 		
 		//see if packet is an http packet (port 80)
-		if(ntohs(tcph->dest) == 80) {
-			printk("Packet has dest port 80\n");
+		if(ntohs(tcph->dest) == SOURCE_PORT) {
+
+            printk("Incoming port 80 packet intercepted: " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
+
 			//if it is, change the destination address to localhost (our cache)
-			printk("Changing destination to 127.0.0.1\n");
+			//printk("Changing destination to 127.0.0.1\n");
 			iph->daddr = htonl(0x7F000001); //127.0.0.1
-			printk("changed to %d\n",ntohl(iph->daddr));
+			//printk("changed to " NIPQUAD_FMT "\n",NIPQUAD(iph->daddr));
 			
 			//checksum ip header
 			iph->check = 0;
@@ -136,6 +144,8 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 			len = skb->len;
 			tcph->check = 0;
             tcph->check = tcp_v4_check(tcph, len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));
+
+            printk("Packet transmogrified to: " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 		}
 	}
 
@@ -144,13 +154,14 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 
 static int __init init(void)
 {
+    printk("kcache started.\n");
 	
 	//configure NF_IP_PRE_ROUTING struct and register hook
 	netfilter_ops_in.hook = in_hook;
 	netfilter_ops_in.pf = PF_INET;                              
 	netfilter_ops_in.hooknum = NF_IP_PRE_ROUTING;//NF_INET_PRE_ROUTING;                 
 	netfilter_ops_in.priority = NF_IP_PRI_FIRST;                    
-	nf_register_hook(&netfilter_ops_in);     
+	//nf_register_hook(&netfilter_ops_in);     
 
 	entry();
                      
@@ -159,6 +170,8 @@ static int __init init(void)
 
 static void __exit cleanup(void)
 {
+    printk("kcache stopped.\n");
+
 	//unregister hook
 	nf_unregister_hook(&netfilter_ops_in);
 	
