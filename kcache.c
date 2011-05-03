@@ -23,9 +23,9 @@
 #define PKT_INFO(iph, tcph) NIPQUAD (iph->saddr), ntohs(tcph->source), NIPQUAD(iph->daddr), ntohs(tcph->dest)
 #define PKT_INFO_FMT "(src: " NIPQUAD_FMT ":%u, dst: " NIPQUAD_FMT ":%u)"
 
-#define PORT 80
+#define PORT 8099
 
-static int start = 0;
+static int start = 1;
 module_param(start, int, 0755);
 
 static int time = 3600;
@@ -36,9 +36,17 @@ static struct nf_hook_ops netfilter_ops_out;
 struct task_struct *main_thread;
 
 /** main caching functionality */
-void kcache_handle_request(char *request)
+void kcache_handle_request(void *sock, char *request)
 {
 	// XXX
+
+    char *buf;
+    int len;
+
+    buf = kmalloc(512, GFP_KERNEL);
+    len = sprintf(buf, "{Cached Response goes here!}\r\n");
+    ksend(sock, buf, len, 0);
+    kfree(buf);
 }
 
 /** munge outgoing port 80 TCP packet's source address */
@@ -74,10 +82,10 @@ int kcache_handler(void *sock)
     if (len < 0) goto clean;
 
     printk("kcache: received request:[\n%s\n]\n", request);
-	kcache_handle_request(request);
+	kcache_handle_request(sock, request);
 
 clean:
-    msleep(10);
+    msleep(100);
     kclose(sock);
     return 0;
 }
@@ -115,10 +123,9 @@ int kcache_main(void *arg)
     }
 
     // accept connections until it kthread_should_stop() tells us not to
+	printk("kcache: listening...\n");
     while ((sockfd_cli = kaccept(sockfd_srv, (struct sockaddr *)&addr_cli, &addr_len)) != NULL) {
-        tmp = inet_ntoa(&addr_cli.sin_addr);
-        kfree(tmp);
-        
+		printk("kcache: received connection...\n");        
         kthread_run(kcache_handler, sockfd_cli, "kcache_handler");
     }
 
@@ -224,6 +231,8 @@ int time_read(char* page, char** start, off_t off, int count, int* eof, void* da
 static int __init init(void)
 {
     struct proc_dir_entry *kcache_dir, *time, *size;
+	
+    printk("kcache: module started.\n");
 
     kcache_dir = proc_mkdir("kcache", NULL);
 
@@ -250,7 +259,6 @@ static int __init init(void)
 	nf_register_hook(&netfilter_ops_in);
     nf_register_hook(&netfilter_ops_out);
 
-    printk("kcache: module started.\n");
 	return 0;
 }
 
