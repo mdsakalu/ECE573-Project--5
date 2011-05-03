@@ -26,6 +26,9 @@
 static int start = 0;
 module_param(start, int, 0755);
 
+static int time = 3600;
+static int size = 16384;
+
 static struct nf_hook_ops netfilter_ops_in;
 static struct nf_hook_ops netfilter_ops_out;
 struct task_struct *main_thread;
@@ -78,15 +81,15 @@ int kcache_main(void *arg)
 
     // create server socket, bind(), and listen()
     if (NULL == (sockfd_srv = ksocket(AF_INET, SOCK_STREAM, 0))) {
-        printk("socket failed\n");
+        printk("kcache: socket failed\n");
         goto quit;
     }
     if (kbind(sockfd_srv, (struct sockaddr *)&addr_srv, addr_len) < 0) {
-        printk("bind failed\n");
+        printk("kcache: bind failed\n");
         goto quit;
     }
     if (klisten(sockfd_srv, 10) < 0) {
-        printk("listen failed\n");
+        printk("kcache: listen failed\n");
         goto quit;
     }
 
@@ -121,7 +124,7 @@ unsigned int out_hook(unsigned int hooknum, struct sk_buff **sb, const struct ne
 			printk("kcache: outgoing packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 			
 			// XXX perform mangling here
-			mangle_source();
+			//mangle_source();
 		}
     }
     
@@ -165,8 +168,56 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 	return NF_ACCEPT;
 }
 
+int size_write(struct file *filp, const char __user *buff, unsigned long len, void *data)
+{
+    char* buf = kmalloc(len, GFP_KERNEL);
+
+    if (copy_from_user(buf, buff, len)) return -EFAULT;
+    buf[len] = '\0';
+    size = (int) simple_strtol(buf, NULL, 10);
+
+    kfree(buf);
+    return len;
+}
+
+int size_read(char* page, char** start, off_t off, int count, int* eof, void* data)
+{
+    sprintf(page, "%d", size);
+    return strlen(page)+1;
+}
+
+int time_write(struct file *filp, const char __user *buff, unsigned long len, void *data)
+{
+    char* buf = kmalloc(len, GFP_KERNEL);
+
+    if (copy_from_user(buf, buff, len)) return -EFAULT;
+    buf[len] = '\0';
+    time = (int) simple_strtol(buf, NULL, 10);
+
+    kfree(buf);
+    return len;
+}
+
+int time_read(char* page, char** start, off_t off, int count, int* eof, void* data)
+{
+    sprintf(page, "%d", time);
+    return strlen(page)+1;
+}
+
 static int __init init(void)
 {
+    struct proc_dir_entry *kcache_dir, *time, *size;
+
+    kcache_dir = proc_mkdir("kcache", NULL);
+
+    time = create_proc_entry("time", 0755, kcache_dir);
+    time->write_proc = time_write;
+    time->read_proc = time_read;
+
+    size = create_proc_entry("size", 0755, kcache_dir);
+    size->write_proc = size_write;
+    size->read_proc = size_read;
+	
     main_thread = kthread_run(kcache_main, NULL, "kcache_main");
 	
 	netfilter_ops_in.hook = in_hook;
