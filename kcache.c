@@ -44,7 +44,7 @@ void kcache_handle_request(void *sock, char *request)
     int len;
 
     buf = kmalloc(512, GFP_KERNEL);
-    len = sprintf(buf, "{Cached Response goes here!}\r\n");
+    len = sprintf(buf, "stuff\r\n");
     ksend(sock, buf, len, 0);
     kfree(buf);
 }
