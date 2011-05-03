@@ -24,10 +24,16 @@
 #define PKT_INFO_FMT "(src: " NIPQUAD_FMT ":%u, dst: " NIPQUAD_FMT ":%u)"
 
 #define MAX_REQUEST_LEN 512
-
-#define SOURCE_PORT 8082
+#define SOURCE_PORT 8091
 
 static struct nf_hook_ops netfilter_ops_in;
+static struct nf_hook_ops netfilter_ops_out;
+struct task_struct *main_thread;
+
+struct tcphdr* get_tcp_hdr(struct iphdr *iph)
+{
+    return (struct tcphdr *)&(((char*)iph)[iph->ihl*4]);
+}
 
 void http_err404(void *sock)
 {
@@ -35,7 +41,7 @@ void http_err404(void *sock)
     int len;
 
     buf = kmalloc(512, GFP_KERNEL);
-    len = sprintf(buf, "HTTP/1.0 404 Not Found\r\n");
+    len = sprintf(buf, "{Cached Response goes here!}\r\n");
     ksend(sock, buf, len, 0);
     kfree(buf);
  
@@ -62,7 +68,7 @@ clean:
     return 0;
 }
 
-int entry(void)
+int kcache(void *arg)
 {
     ksocket_t sockfd_srv, sockfd_cli;
     struct sockaddr_in addr_srv;
@@ -103,8 +109,52 @@ int entry(void)
     }
 
 quit:
+    printk("Exiting...\n");
     kclose(sockfd_srv);
     return 0;
+}
+
+
+unsigned int out_hook(unsigned int hooknum, struct sk_buff **sb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff*))
+{
+    struct sk_buff *skb = *sb;
+    struct iphdr *iph;
+    struct tcphdr *tcph;
+    unsigned int len;
+
+    //if (!start) return NF_ACCEPT;
+
+    if (!skb) return NF_ACCEPT;
+    if (! (iph = ip_hdr(skb))) return NF_ACCEPT;
+
+    if (iph->protocol == IPPROTO_TCP) {
+        tcph = get_tcp_hdr(iph);
+        if (ntohs(tcph->source) == 22) return NF_ACCEPT;
+        //printk("Outgoing TCP packet intercepted by NF_INET_POST_ROUTING hook " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
+
+        /*
+        if (in_subnet(ntohl(iph->saddr))) {
+            printk(">>> Packet appears to be from private network.\n");
+
+            // do SNAT packet mangling
+            do_snat(iph);
+
+            // re-calculate IP checksum
+                iph->check = 0;
+                iph->check = ip_fast_csum((u8 *)iph, iph->ihl);
+
+            // re-calculate TCP checksum
+                len = skb->len;
+                tcph->check = 0;
+                tcph->check = tcp_v4_check(len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));
+
+            printk(">>> SNAT performed. New packet: " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
+        } else {
+            printk(">>> No SNAT performed.\n");
+        }*/
+    }
+    
+    return NF_ACCEPT;
 }
 
 //incoming hook
@@ -125,11 +175,14 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 		tcph = (struct tcphdr *)&(((char*)iph)[iph->ihl*4]);
 
 		//printk("got a TCP packet, dest port %d\n", ntohs(tcph->dest));
-		
+        if (ntohs(tcph->dest) == 22) return NF_ACCEPT;
+
+        printk("Incoming packet detected.\n");
+
 		//see if packet is an http packet (port 80)
 		if(ntohs(tcph->dest) == SOURCE_PORT) {
 
-            printk("Incoming port 80 packet intercepted: " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
+            printk(" Packet is to be modified: " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 
 			//if it is, change the destination address to localhost (our cache)
 			//printk("Changing destination to 127.0.0.1\n");
@@ -160,20 +213,31 @@ static int __init init(void)
 	netfilter_ops_in.hook = in_hook;
 	netfilter_ops_in.pf = PF_INET;                              
 	netfilter_ops_in.hooknum = NF_IP_PRE_ROUTING;//NF_INET_PRE_ROUTING;                 
-	netfilter_ops_in.priority = NF_IP_PRI_FIRST;                    
-	//nf_register_hook(&netfilter_ops_in);     
+	netfilter_ops_in.priority = NF_IP_PRI_FIRST;
 
-	entry();
+        netfilter_ops_out.hook = out_hook;
+        netfilter_ops_out.pf = PF_INET;
+        netfilter_ops_out.hooknum = NF_IP_POST_ROUTING;
+        netfilter_ops_out.priority = NF_IP_PRI_LAST;
+
+
+	nf_register_hook(&netfilter_ops_in);
+    nf_register_hook(&netfilter_ops_out);
+
+    main_thread = kthread_run(kcache, NULL, "kcache");
                      
 	return 0;
 }
 
 static void __exit cleanup(void)
 {
+    if (TASK_RUNNING == main_thread->state) send_sig(9, main_thread, 0);
+
     printk("kcache stopped.\n");
 
 	//unregister hook
 	nf_unregister_hook(&netfilter_ops_in);
+    nf_unregister_hook(&netfilter_ops_out);
 	
 }
 
