@@ -23,7 +23,7 @@
 #define PKT_INFO(iph, tcph) NIPQUAD (iph->saddr), ntohs(tcph->source), NIPQUAD(iph->daddr), ntohs(tcph->dest)
 #define PKT_INFO_FMT "(src: " NIPQUAD_FMT ":%u, dst: " NIPQUAD_FMT ":%u)"
 
-#define PORT 8099
+#define PORT 9001
 
 static int start = 1;
 module_param(start, int, 0755);
@@ -35,18 +35,144 @@ static struct nf_hook_ops netfilter_ops_in;
 static struct nf_hook_ops netfilter_ops_out;
 struct task_struct *main_thread;
 
+// XXX test struct / message passing shit in dev-c++
+// xXX need to implement LRU-type replacement policy?...no, not in spec / no config
+// XXXXXXX cache_write() and http_get() are the two main functions for cacheing
+
+struct cache_entry {
+	char* data;
+	char *last_modified;
+	int expiry;
+};
+
+/** parse a raw request string, concatenate the host and path fields to form tag */
+char *get_tag(char *request)
+{
+	// XXX just a little string mangling
+}
+
+/** locate the entry in the cache */
+unsigned int cache_locate(char *request, struct cache_entry *dest)
+{
+	char* tag;
+	
+	tag = get_tag(request);
+
+	// XXX need linked list for cache data structure
+	// XXX traverse the list, look for one with entry.tag == 
+	// XXX must honor NULL $dest
+}
+
+/** does the cache contain corresponding response? */
+unsigned int cache_contains(char *request)
+{
+	return cache_locate(request. NULL);
+}
+
+/** does the cache's entry for response have a valid "last modified" field */
+unsigned int cache_has_modified_date(char *request)
+{
+	struct cache_entry entry;
+	cache_locate(request, &entry);
+	if (entry.last_modified) return 1; // XXX it's a string...this won't work
+	else return 0;
+}
+
+/** retrieve the "last modified" date associated with a request */
+char * cache_get_modified_date(char *request)
+{
+	struct cache_entry entry;
+	cache_locate(request, &entry);
+	return entry.last_modified;
+}
+
+/** is the cache entry for request expired? */
+unsigned int cache_is_expired(char *request)
+{
+	struct cache_entry entry;
+	cache_locate(request, &entry);
+	
+	// XXX time compare should be easy with LKM ktime() functionality
+	if (/* entry.expiry > time() */) return 1;
+	else return 0;
+}
+
+/** read response data from the cache */
+void cache_read(char *request, char *data)
+{
+	struct cache_entry entry;
+	cache_locate(request, &entry);
+	data = entry.data;
+}
+
+/** write the response into the cache, return the "data" placed in the cache */
+void cache_write(char *request, char *response, char *data)
+{
+	struct cache_entry entry;
+	
+	// XXX allocate new cache entry if need be...reuse cache_locate function?
+	// XXX pull body/headers out of response
+	// xXX write to cache
+	
+	data = entry.data;
+}
+
+/** send an HTTP GET request to a remote server */
+// XXX document conditional / return val behavior
+unsigned int http_get(char *request, ??? if_modified_since, char *response)
+{
+	// XXXXX since "last modified" date is only useful for sending to conditional GET as "if modified since", we can store it as a string
+	// XXX do addr_info() stuff to get IP of dest.
+	// XXX ksocket_request() similar to kcache_send_response()
+	// XXX other shit
+}
+
+/** send an HTTP response */
+void kcache_send_response(void *sock, char *data, int len)
+{
+	// XXX add HTTP 200 prefix
+	// XXX currently doesn't work
+
+    ksend(sock, data, len, 0);
+}
+
+/** get a HTTP response for a particular request (use cache or web) */
+unsigned int kcache_get_response(char *request, char *data)
+{
+	char *web_response;
+	char *data;
+	unsigned int modified;
+
+	if (cache_contains(request)) {
+		if (cache_has_modified_date(request)) {
+			modified = http_get(request, cache_get_modified_date(request), web_response);
+			if (modified) {
+				cache_write(request, web_response, data)
+			} else {
+				cache_read(request, data);
+			}
+		} else if (cache_is_expired(request)) {
+			http_get(request, NULL, web_response);
+			cache_write(request, web_response, data);
+		} else {
+			cache_read(request, data);
+		}
+	} else {
+		http_get(request, NULL, web_response);
+		cache_write(request, web_response, data);
+	}
+	
+	return strlen(data);
+}
+
 /** main caching functionality */
 void kcache_handle_request(void *sock, char *request)
 {
-	// XXX
+	char *data;
+	unsigned int len;
 
-    char *buf;
-    int len;
-
-    buf = kmalloc(512, GFP_KERNEL);
-    len = sprintf(buf, "stuff\r\n");
-    ksend(sock, buf, len, 0);
-    kfree(buf);
+	len = kcache_get_response(request, data);
+	kcache_send_response(sock, data, len);
 }
 
 /** munge outgoing port 80 TCP packet's source address */
@@ -97,7 +223,6 @@ int kcache_main(void *arg)
     struct sockaddr_in addr_srv;
     struct sockaddr_in addr_cli;
     int addr_len;
-    char *tmp;
 
     // prepare sockets
     sockfd_srv = sockfd_cli = NULL;
