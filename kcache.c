@@ -23,6 +23,8 @@
 #define PKT_INFO(iph, tcph) NIPQUAD (iph->saddr), ntohs(tcph->source), NIPQUAD(iph->daddr), ntohs(tcph->dest)
 #define PKT_INFO_FMT "(src: " NIPQUAD_FMT ":%u, dst: " NIPQUAD_FMT ":%u)"
 
+#define PORT 80
+
 static int start = 0;
 module_param(start, int, 0755);
 
@@ -32,6 +34,26 @@ static int size = 16384;
 static struct nf_hook_ops netfilter_ops_in;
 static struct nf_hook_ops netfilter_ops_out;
 struct task_struct *main_thread;
+
+/** main caching functionality */
+void kcache_handle_request(char *request)
+{
+	// XXX
+}
+
+/** munge outgoing port 80 TCP packet's source address */
+void kcache_mangle_outgoing(struct iphdr *iph, struct tcphdr *tcph)
+{
+	// XXX
+}
+
+/** munge incoming port 80 TCP packet's destination address */
+void kcache_mangle_incoming(struct iphdr *iph, struct tcphdr *tcph)
+{
+	// XXX
+
+	//iph->daddr = htonl(0x7F000001);
+}
 
 struct tcphdr* get_tcp_hdr(struct iphdr *iph)
 {
@@ -52,8 +74,7 @@ int kcache_handler(void *sock)
     if (len < 0) goto clean;
 
     printk("kcache: received request:[\n%s\n]\n", request);
-
-    // XXX handle request here
+	kcache_handle_request(request);
 
 clean:
     msleep(10);
@@ -75,7 +96,7 @@ int kcache_main(void *arg)
     memset(&addr_cli, 0, sizeof(addr_cli));
     memset(&addr_srv, 0, sizeof(addr_srv));
     addr_srv.sin_family = AF_INET;
-    addr_srv.sin_port = htons(80);
+    addr_srv.sin_port = htons(PORT);
     addr_srv.sin_addr.s_addr = INADDR_ANY;
     addr_len = sizeof(struct sockaddr_in);
 
@@ -106,7 +127,7 @@ quit:
     return 0;
 }
 
-/** NF_IP_POST_ROUTING netfilter hook to munge outgoing port 80 TCP packet's source address */
+/** NF_IP_POST_ROUTING netfilter hook */
 unsigned int out_hook(unsigned int hooknum, struct sk_buff **sb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff*))
 {
     struct sk_buff *skb = *sb;
@@ -120,18 +141,17 @@ unsigned int out_hook(unsigned int hooknum, struct sk_buff **sb, const struct ne
 
     if ((iph->protocol == IPPROTO_TCP)) {
         tcph = get_tcp_hdr(iph);
-		if (ntohs(tcph->dest) == 80) {
+		if (ntohs(tcph->dest) == PORT) {
 			printk("kcache: outgoing packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 			
-			// XXX perform mangling here
-			//mangle_source();
+			kcache_mangle_outgoing(iph, tcph);
 		}
     }
     
     return NF_ACCEPT;
 }
 
-/** NF_IP_PRE_ROUTING netfilter hook to munge incoming port 80 TCP packet's destination address */
+/** NF_IP_PRE_ROUTING netfilter hook to */
 unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff*))
 {
     struct sk_buff *skb = *sb;
@@ -148,20 +168,17 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 
     if (iph->protocol == IPPROTO_TCP) {
         tcph = get_tcp_hdr(iph);
-		if (ntohs(tcph->dest) == 80) {
+		if (ntohs(tcph->dest) == PORT) {
 			printk("kcache: incoming packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 			
-			// XXX perform mangling here
-			/*iph->daddr = htonl(0x7F000001);
+			kcache_mangle_incoming(iph, tcph);
 			
-			//checksum ip header
+			// re-calculate checksums, as packet changed
 			iph->check = 0;
 			iph->check = ip_fast_csum((u8 *)iph, iph->ihl); 
-			
-			//checksum tcp header
 			len = skb->len;
 			tcph->check = 0;
-			tcph->check = tcp_v4_check(tcph, len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));*/
+			tcph->check = tcp_v4_check(tcph, len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));
 		}
 	}
 
