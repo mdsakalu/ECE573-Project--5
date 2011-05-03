@@ -23,8 +23,8 @@
 #define PKT_INFO(iph, tcph) NIPQUAD (iph->saddr), ntohs(tcph->source), NIPQUAD(iph->daddr), ntohs(tcph->dest)
 #define PKT_INFO_FMT "(src: " NIPQUAD_FMT ":%u, dst: " NIPQUAD_FMT ":%u)"
 
-#define MAX_REQUEST_LEN 512
-#define SOURCE_PORT 8091
+static int start = 0;
+module_param(start, int, 0755);
 
 static struct nf_hook_ops netfilter_ops_in;
 static struct nf_hook_ops netfilter_ops_out;
@@ -35,32 +35,22 @@ struct tcphdr* get_tcp_hdr(struct iphdr *iph)
     return (struct tcphdr *)&(((char*)iph)[iph->ihl*4]);
 }
 
-void http_err404(void *sock)
+/** handle a socket connection (short-running thread) */
+int kcache_handler(void *sock)
 {
-    char *buf;
+    char request[512];
     int len;
+	
+	if (!start) goto clean;
 
-    buf = kmalloc(512, GFP_KERNEL);
-    len = sprintf(buf, "{Cached Response goes here!}\r\n");
-    ksend(sock, buf, len, 0);
-    kfree(buf);
- 
-}
-
-int conn_handler(void *sock)
-{
-    char request[MAX_REQUEST_LEN];
-    int len;
-
-    // read raw request
+    // read raw data (presumed HTTP request)
     memset(request, 0, sizeof(request));
     len = krecv(sock, request, sizeof(request), 0);
-
     if (len < 0) goto clean;
 
-    printk("Received Request:[\n%s\n]\n", request);
+    printk("kcache: received request:[\n%s\n]\n", request);
 
-    http_err404(sock);
+    // XXX handle request here
 
 clean:
     msleep(10);
@@ -68,7 +58,8 @@ clean:
     return 0;
 }
 
-int kcache(void *arg)
+/** main HTTP web server (long-running thread) */
+int kcache_main(void *arg)
 {
     ksocket_t sockfd_srv, sockfd_cli;
     struct sockaddr_in addr_srv;
@@ -81,7 +72,7 @@ int kcache(void *arg)
     memset(&addr_cli, 0, sizeof(addr_cli));
     memset(&addr_srv, 0, sizeof(addr_srv));
     addr_srv.sin_family = AF_INET;
-    addr_srv.sin_port = htons(SOURCE_PORT);
+    addr_srv.sin_port = htons(80);
     addr_srv.sin_addr.s_addr = INADDR_ANY;
     addr_len = sizeof(struct sockaddr_in);
 
@@ -102,62 +93,42 @@ int kcache(void *arg)
     // accept connections until it kthread_should_stop() tells us not to
     while ((sockfd_cli = kaccept(sockfd_srv, (struct sockaddr *)&addr_cli, &addr_len)) != NULL) {
         tmp = inet_ntoa(&addr_cli.sin_addr);
-        printk("Client connected from %s:%d.\n", tmp, ntohs(addr_cli.sin_port));
         kfree(tmp);
         
-        kthread_run(conn_handler, sockfd_cli, "httpcon");
+        kthread_run(kcache_handler, sockfd_cli, "kcache_handler");
     }
 
 quit:
-    printk("Exiting...\n");
     kclose(sockfd_srv);
     return 0;
 }
 
-
+/** NF_IP_POST_ROUTING netfilter hook to munge outgoing port 80 TCP packet's source address */
 unsigned int out_hook(unsigned int hooknum, struct sk_buff **sb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff*))
 {
     struct sk_buff *skb = *sb;
     struct iphdr *iph;
     struct tcphdr *tcph;
-    unsigned int len;
-
-    //if (!start) return NF_ACCEPT;
+	
+	if (!start) return NF_ACCEPT;
 
     if (!skb) return NF_ACCEPT;
     if (! (iph = ip_hdr(skb))) return NF_ACCEPT;
 
-    if (iph->protocol == IPPROTO_TCP) {
+    if ((iph->protocol == IPPROTO_TCP)) {
         tcph = get_tcp_hdr(iph);
-        if (ntohs(tcph->source) == 22) return NF_ACCEPT;
-        //printk("Outgoing TCP packet intercepted by NF_INET_POST_ROUTING hook " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
-
-        /*
-        if (in_subnet(ntohl(iph->saddr))) {
-            printk(">>> Packet appears to be from private network.\n");
-
-            // do SNAT packet mangling
-            do_snat(iph);
-
-            // re-calculate IP checksum
-                iph->check = 0;
-                iph->check = ip_fast_csum((u8 *)iph, iph->ihl);
-
-            // re-calculate TCP checksum
-                len = skb->len;
-                tcph->check = 0;
-                tcph->check = tcp_v4_check(len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));
-
-            printk(">>> SNAT performed. New packet: " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
-        } else {
-            printk(">>> No SNAT performed.\n");
-        }*/
+		if (ntohs(tcph->dest) == 80) {
+			printk("kcache: outgoing packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
+			
+			// XXX perform mangling here
+			mangle_source();
+		}
     }
     
     return NF_ACCEPT;
 }
 
-//incoming hook
+/** NF_IP_PRE_ROUTING netfilter hook to munge incoming port 80 TCP packet's destination address */
 unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff*))
 {
     struct sk_buff *skb = *sb;
@@ -165,29 +136,20 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 	struct tcphdr *tcph;
 	unsigned int len;
 	
-	//printk("in hook called\n");
+	if (!start) return NF_ACCEPT;
+	
 	if (!skb) return NF_ACCEPT;
 
 	iph = ip_hdr(skb);
-	if (!iph) return NF_ACCEPT;
+    if (! (iph = ip_hdr(skb))) return NF_ACCEPT;
 
-	if (iph->protocol==IPPROTO_TCP){
-		tcph = (struct tcphdr *)&(((char*)iph)[iph->ihl*4]);
-
-		//printk("got a TCP packet, dest port %d\n", ntohs(tcph->dest));
-        if (ntohs(tcph->dest) == 22) return NF_ACCEPT;
-
-        printk("Incoming packet detected.\n");
-
-		//see if packet is an http packet (port 80)
-		if(ntohs(tcph->dest) == SOURCE_PORT) {
-
-            printk(" Packet is to be modified: " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
-
-			//if it is, change the destination address to localhost (our cache)
-			//printk("Changing destination to 127.0.0.1\n");
-			iph->daddr = htonl(0x7F000001); //127.0.0.1
-			//printk("changed to " NIPQUAD_FMT "\n",NIPQUAD(iph->daddr));
+    if (iph->protocol == IPPROTO_TCP) {
+        tcph = get_tcp_hdr(iph);
+		if (ntohs(tcph->dest) == 80) {
+			printk("kcache: incoming packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
+			
+			// XXX perform mangling here
+			/*iph->daddr = htonl(0x7F000001);
 			
 			//checksum ip header
 			iph->check = 0;
@@ -196,9 +158,7 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 			//checksum tcp header
 			len = skb->len;
 			tcph->check = 0;
-            tcph->check = tcp_v4_check(tcph, len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));
-
-            printk("Packet transmogrified to: " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
+			tcph->check = tcp_v4_check(tcph, len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));*/
 		}
 	}
 
@@ -207,25 +167,22 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 
 static int __init init(void)
 {
-    printk("kcache started.\n");
+    main_thread = kthread_run(kcache_main, NULL, "kcache_main");
 	
-	//configure NF_IP_PRE_ROUTING struct and register hook
 	netfilter_ops_in.hook = in_hook;
 	netfilter_ops_in.pf = PF_INET;                              
-	netfilter_ops_in.hooknum = NF_IP_PRE_ROUTING;//NF_INET_PRE_ROUTING;                 
+	netfilter_ops_in.hooknum = NF_IP_PRE_ROUTING;
 	netfilter_ops_in.priority = NF_IP_PRI_FIRST;
-
-        netfilter_ops_out.hook = out_hook;
-        netfilter_ops_out.pf = PF_INET;
-        netfilter_ops_out.hooknum = NF_IP_POST_ROUTING;
-        netfilter_ops_out.priority = NF_IP_PRI_LAST;
-
+	
+	netfilter_ops_out.hook = out_hook;
+	netfilter_ops_out.pf = PF_INET;
+	netfilter_ops_out.hooknum = NF_IP_POST_ROUTING;
+	netfilter_ops_out.priority = NF_IP_PRI_LAST;
 
 	nf_register_hook(&netfilter_ops_in);
     nf_register_hook(&netfilter_ops_out);
 
-    main_thread = kthread_run(kcache, NULL, "kcache");
-                     
+    printk("kcache: module started.\n");
 	return 0;
 }
 
@@ -233,12 +190,10 @@ static void __exit cleanup(void)
 {
     if (TASK_RUNNING == main_thread->state) send_sig(9, main_thread, 0);
 
-    printk("kcache stopped.\n");
-
-	//unregister hook
 	nf_unregister_hook(&netfilter_ops_in);
     nf_unregister_hook(&netfilter_ops_out);
 	
+    printk("kcache: module stopped.\n");
 }
 
 module_init(init);
