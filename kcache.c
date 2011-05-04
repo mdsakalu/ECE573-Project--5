@@ -22,11 +22,20 @@
 
 #define PKT_INFO(iph, tcph) NIPQUAD (iph->saddr), ntohs(tcph->source), NIPQUAD(iph->daddr), ntohs(tcph->dest)
 #define PKT_INFO_FMT "(src: " NIPQUAD_FMT ":%u, dst: " NIPQUAD_FMT ":%u)"
+#define time_since_add(entry) (CURRENT_TIME.tv_sec)-(entry->timestamp)
 
-#define PORT 9001
+#define PORT 9002
 
 static int start = 1;
 module_param(start, int, 0755);
+
+struct cache {
+    struct list_head list;
+    char *tag;
+    unsigned long int timestamp;
+    char *modified;
+    char *data;
+} response_cache;
 
 static int time = 3600;
 static int size = 16384;
@@ -35,144 +44,150 @@ static struct nf_hook_ops netfilter_ops_in;
 static struct nf_hook_ops netfilter_ops_out;
 struct task_struct *main_thread;
 
-// XXX test struct / message passing shit in dev-c++
-// xXX need to implement LRU-type replacement policy?...no, not in spec / no config
-// XXXXXXX cache_write() and http_get() are the two main functions for cacheing
-
-struct cache_entry {
-	char* data;
-	char *last_modified;
-	int expiry;
-};
-
-/** parse a raw request string, concatenate the host and path fields to form tag */
-char *get_tag(char *request)
+/** Locate an entry in the cache. Returns the entry, or 0 if locate fails. */
+struct cache *cache_locate(char *tag)
 {
-	// XXX just a little string mangling
+    struct cache *tmp;
+
+    list_for_each_entry(tmp, &response_cache.list, list) {
+        if (0 == strcmp(tag, tmp->tag)) return tmp;
+    }
+
+    return 0;
 }
 
-/** locate the entry in the cache */
-unsigned int cache_locate(char *request, struct cache_entry *dest)
+/** write buffer $data to cache */
+void cache_write(char *tag, char *data)
 {
-	char* tag;
+    struct cache *entry;
+	entry = cache_locate(tag);
+	strcpy(entry->data, data);
+}
+
+/** read an entry to the cache into buffer $data */
+char *cache_read(char *tag)
+{
+    struct cache *entry;
+    entry = cache_locate(tag);
+    return entry->data;
+}
+
+/**
+ * Sends the specified raw HTTP request to a remote server.
+ * If modified is set, it will be added to the request as the "If-Modified-Since"
+ * header for a conditional GET request.
+ *
+ * The raw response given by the remote server will be copied into the response buffer.
+ *
+ * Function returns 1 if the resource was modified (or if a traditional GET request was sent).
+ */
+unsigned int __http_get(char *request, char *modified, char *data)
+{
+	unsigned int is_modified = 1;
 	
-	tag = get_tag(request);
-
-	// XXX need linked list for cache data structure
-	// XXX traverse the list, look for one with entry.tag == 
-	// XXX must honor NULL $dest
-}
-
-/** does the cache contain corresponding response? */
-unsigned int cache_contains(char *request)
-{
-	return cache_locate(request. NULL);
-}
-
-/** does the cache's entry for response have a valid "last modified" field */
-unsigned int cache_has_modified_date(char *request)
-{
-	struct cache_entry entry;
-	cache_locate(request, &entry);
-	if (entry.last_modified) return 1; // XXX it's a string...this won't work
-	else return 0;
-}
-
-/** retrieve the "last modified" date associated with a request */
-char * cache_get_modified_date(char *request)
-{
-	struct cache_entry entry;
-	cache_locate(request, &entry);
-	return entry.last_modified;
-}
-
-/** is the cache entry for request expired? */
-unsigned int cache_is_expired(char *request)
-{
-	struct cache_entry entry;
-	cache_locate(request, &entry);
+	printk("__http_get() called");
+	// 0 make sure that packet mangling doesn't interfere with this code
+	// 1 use getAddrInfo() to generate the socket destination IP from "host" header
+	// 2 append modified to headers, if necessary
+	// 3 perform HTTP transaction, place result into "response"
+	// 4 only return body + headers portion of response
+	// 5 if 304 response, set modified to 0 (data is undefined)
 	
-	// XXX time compare should be easy with LKM ktime() functionality
-	if (/* entry.expiry > time() */) return 1;
-	else return 0;
+	return is_modified;
 }
 
-/** read response data from the cache */
-void cache_read(char *request, char *data)
+unsigned int http_conditional_get(char *request, char *modified, char *data)
 {
-	struct cache_entry entry;
-	cache_locate(request, &entry);
-	data = entry.data;
+	return __http_get(request, modified, data);
 }
 
-/** write the response into the cache, return the "data" placed in the cache */
-void cache_write(char *request, char *response, char *data)
+void http_get(char *request, char *data)
 {
-	struct cache_entry entry;
-	
-	// XXX allocate new cache entry if need be...reuse cache_locate function?
-	// XXX pull body/headers out of response
-	// xXX write to cache
-	
-	data = entry.data;
+	__http_get(request, 0, data);
 }
 
-/** send an HTTP GET request to a remote server */
-// XXX document conditional / return val behavior
-unsigned int http_get(char *request, ??? if_modified_since, char *response)
-{
-	// XXXXX since "last modified" date is only useful for sending to conditional GET as "if modified since", we can store it as a string
-	// XXX do addr_info() stuff to get IP of dest.
-	// XXX ksocket_request() similar to kcache_send_response()
-	// XXX other shit
-}
 
-/** send an HTTP response */
-void kcache_send_response(void *sock, char *data, int len)
+/** send an HTTP response to the client */
+void kcache_send_response(void *cli_sock, char *data, int len)
 {
+	#define HTTPOK "HTTP/1.0 200 OK Document Follows\r\n";
 	// XXX add HTTP 200 prefix
-	// XXX currently doesn't work
 
-    ksend(sock, data, len, 0);
+    ksend(cli_sock, data, len, 0);
+}
+
+/** get the tag based on a HTTP request **/
+// TODO error checking (request parsing + allocation
+void get_tag(char *request, char *tag)
+{
+    char *host, *path, *tmp;
+
+    path = kmalloc(512, GFP_KERNEL);
+    host = kmalloc(512, GFP_KERNEL);
+    
+    // get the path
+    sscanf(request, "GET %s", path);
+
+    // get the host
+    tmp = strstr(request, "Host: ");
+    if (tmp) sscanf(tmp, "Host: %s", host);
+
+    strcpy(tag, host);
+    strcat(tag, path);
+
+    kfree(path);
+    kfree(host);
 }
 
 /** get a HTTP response for a particular request (use cache or web) */
 unsigned int kcache_get_response(char *request, char *data)
 {
-	char *web_response;
-	char *data;
-	unsigned int modified;
+    struct cache *entry;
+    char *tag;
+    unsigned int modified;
+	char *cached_data; // xxx can eliminate after testing
 
-	if (cache_contains(request)) {
-		if (cache_has_modified_date(request)) {
-			modified = http_get(request, cache_get_modified_date(request), web_response);
+    tag = kmalloc(1024, GFP_KERNEL);
+    get_tag(request, tag);
+
+	// general caching logic
+	if ( (entry = cache_locate(tag))) {
+		if (entry->modified) {
+			modified = http_conditional_get(request, entry->modified, data);
 			if (modified) {
-				cache_write(request, web_response, data)
+				cache_write(tag, data);
 			} else {
-				cache_read(request, data);
+				cached_data = cache_read(tag);
+				strcpy(data, cached_data);
 			}
-		} else if (cache_is_expired(request)) {
-			http_get(request, NULL, web_response);
-			cache_write(request, web_response, data);
+		} else if (time_since_add(entry) > time) {
+			http_get(request, data);
+			cache_write(tag, data);
 		} else {
-			cache_read(request, data);
+			cached_data = cache_read(tag);
+			strcpy(data, cached_data);
 		}
 	} else {
-		http_get(request, NULL, web_response);
-		cache_write(request, web_response, data);
+		http_get(request, data);
+		cache_write(tag, data);
 	}
 	
+    kfree(tag);
 	return strlen(data);
 }
 
 /** main caching functionality */
 void kcache_handle_request(void *sock, char *request)
 {
-	char *data;
+	char *buf;
 	unsigned int len;
 
-	len = kcache_get_response(request, data);
-	kcache_send_response(sock, data, len);
+    buf = kmalloc(2048, GFP_KERNEL);
+
+	len = kcache_get_response(request, buf);
+	kcache_send_response(sock, buf, len);
+
+    kfree(buf);
 }
 
 /** munge outgoing port 80 TCP packet's source address */
@@ -358,6 +373,8 @@ static int __init init(void)
     struct proc_dir_entry *kcache_dir, *time, *size;
 	
     printk("kcache: module started.\n");
+
+    INIT_LIST_HEAD(&response_cache.list);
 
     kcache_dir = proc_mkdir("kcache", NULL);
 
