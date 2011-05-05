@@ -62,7 +62,7 @@ struct task_struct *main_thread;
 
 
 /** Get the total size of the cache */
-unsigned int cache_size()
+unsigned int cache_size(void)
 {
     struct cache *tmp;
 	unsigned int size = 0;
