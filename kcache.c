@@ -24,7 +24,8 @@
 #define PKT_INFO_FMT "(src: " NIPQUAD_FMT ":%u, dst: " NIPQUAD_FMT ":%u)"
 #define time_since_add(entry) (CURRENT_TIME.tv_sec)-(entry->timestamp)
 
-#define PORT 9002
+#define PORT 80
+#define MAX_RESPONSE_LEN 1024
 
 static int start = 1;
 module_param(start, int, 0755);
@@ -44,7 +45,57 @@ static struct nf_hook_ops netfilter_ops_in;
 static struct nf_hook_ops netfilter_ops_out;
 struct task_struct *main_thread;
 
-/** Locate an entry in the cache. Returns the entry, or 0 if locate fails. */
+
+/** Get the total size of the cache */
+unsigned int cache_size()
+{
+    struct cache *tmp;
+	unsigned int size = 0;
+
+    list_for_each_entry(tmp, &response_cache.list, list) {
+        size += strlen(tmp->data);
+    }
+
+    return size;
+}
+
+
+/** get the value of a particular HTTP header */
+unsigned int get_header(char *http, char *key, char *destbuf)
+{
+	char buf[256];
+    char *tmp;
+	
+	strcpy(buf, key);
+	strcat(buf, ": %s");
+	
+    tmp = strstr(http, key);
+    if (tmp) {
+		sscanf(tmp, buf, destbuf);
+		return 1;
+	}
+	else return 0;
+}
+
+
+/** Make room for new data */
+void cache_make_room(unsigned int size)
+{
+    struct list_head *pos, *q;
+    struct cache *tmp;
+	
+	// just blast away everything
+    list_for_each_safe(pos, q, &response_cache.list) {
+        tmp = list_entry(pos, struct cache, list);
+        list_del(pos);
+        kfree(tmp->tag);
+        kfree(tmp->modified);
+        kfree(tmp->data);
+        kfree(tmp);
+    }
+}
+
+/** Get the entry added long ago to the cache */
 struct cache *cache_locate(char *tag)
 {
     struct cache *tmp;
@@ -56,12 +107,59 @@ struct cache *cache_locate(char *tag)
     return 0;
 }
 
-/** write buffer $data to cache */
+#define MAX_TAG_LEN 512
+#define MAX_MODIFIED_LEN 512
+
+/** write buffer data to cache */
 void cache_write(char *tag, char *data)
 {
     struct cache *entry;
-	entry = cache_locate(tag);
-	strcpy(entry->data, data);
+	char *tmp;
+	
+	printk("writing cache data '%s' for tag '%s'\n", data, tag);
+	
+	// replacement policy - if there's no room...destroy everything
+	if (strlen(data) > size) { // data too big to fit in cache
+		printk("unable to write data...larger than cache size\n");
+		return;
+	} else if ((size-cache_size()) < strlen(data)) { // cache is big enough...but has no room
+		printk("evicting blocks\n");
+		cache_make_room(strlen(data));
+	}
+	
+	// XXX TODO replacement policy
+
+	if ( (entry = cache_locate(tag))) {
+	
+		// _update_ the cache
+		kfree(entry->data);
+		entry->data = kmalloc(strlen(data)+1, GFP_KERNEL); // XXX +1 needed?
+		strcpy(entry->data, data);
+		
+	} else {
+		entry = (struct cache *) kmalloc(sizeof(struct cache), GFP_KERNEL);
+		
+		// set tag
+		entry->tag = kmalloc(MAX_TAG_LEN, GFP_KERNEL);
+		strcpy(entry->tag, tag);
+		
+		// set timestamp
+		entry->timestamp = CURRENT_TIME.tv_sec;
+		
+		// set "last modified" date <--XXX use get_header()
+		if ( (tmp = strstr(data, "Last-Modified: "))) {
+			entry->modified = kmalloc(MAX_MODIFIED_LEN, GFP_KERNEL);
+			sscanf(tmp, "Last-Modified: %s", entry->modified);
+		} else {
+			entry->modified = 0;
+		}
+		
+		// set data
+		entry->data = kmalloc(strlen(data)+1, GFP_KERNEL); // XXX +1 needed?
+		strcpy(entry->data, data);
+		
+		list_add(&(entry->list), &(response_cache.list));
+	}
 }
 
 /** read an entry to the cache into buffer $data */
@@ -81,38 +179,95 @@ char *cache_read(char *tag)
  *
  * Function returns 1 if the resource was modified (or if a traditional GET request was sent).
  */
-unsigned int __http_get(char *request, char *modified, char *data)
+unsigned int __http_get(char *request, char *modified, char *data) // data must be of size MAX_RESPONSE_LEN
 {
 	unsigned int is_modified = 1;
 	
-	printk("__http_get() called");
-	// 0 make sure that packet mangling doesn't interfere with this code
-	// 1 use getAddrInfo() to generate the socket destination IP from "host" header
-	// 2 append modified to headers, if necessary
-	// 3 perform HTTP transaction, place result into "response"
-	// 4 only return body + headers portion of response
-	// 5 if 304 response, set modified to 0 (data is undefined)
+	char host[256];
+	char tmp[512]; // <-- max req len
+	char newRequest[512]; // <-- max req len
+	unsigned int port;
+	
+    ksocket_t sockfd_cli;
+    struct sockaddr_in addr_srv;
+    int addr_len;
+	
+	// if this is a conditional GET, add the modified date to the HTTP request headers
+	if (modified) {
+		strncpy(tmp, request, strlen(request)-2);
+		tmp[strlen(request)-2] = '\0';
+		sprintf(newRequest, "%sIf-Modified-Since: %s\r\n\r\n", tmp, modified);
+	}
+	
+	// XXX Use get_addr_info() to resolve hostnames
+	
+	if (get_header(newRequest, "Host", host)) {
+		printk("HTTP WWW GET request, host is %s\n", host);
+	} else {
+		// ERROR
+		//strcpy(host,"152.1.226.20");
+	}
+	port = 80;
+	
+    memset(&addr_srv, 0, sizeof(addr_srv));
+    addr_srv.sin_family = AF_INET;
+    addr_srv.sin_port = htons(port);
+    addr_srv.sin_addr.s_addr = inet_addr(host);
+    addr_len = sizeof(struct sockaddr_in);
+
+    sockfd_cli = ksocket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd_cli == NULL) {
+        printk("socket failed\n");
+		goto fail;
+    }
+    if (kconnect(sockfd_cli, (struct sockaddr*)&addr_srv, addr_len) < 0) {
+        printk("connect failed\n");
+		goto fail;
+    }
+
+	// XXX write response to buffer, check for 304 response
+    printk("sent message : [[%s]]\n", newRequest);
+	ksend(sockfd_cli, newRequest, strlen(newRequest), 0);
+	krecv(sockfd_cli, data, MAX_RESPONSE_LEN, 0);
+    printk("got message : %s\n", data);
+
+    kclose(sockfd_cli);
+
+	if (0 != strstr(data, "304 Not Modified")) { // it is not modified
+		is_modified = 0;
+		// not modified
+	}
 	
 	return is_modified;
+
+fail:
+	printk("error performing WWW HTTP request...falling back to stale data\n");
+	return -1;
 }
 
 unsigned int http_conditional_get(char *request, char *modified, char *data)
 {
-	return __http_get(request, modified, data);
+	int ret;
+	if (-1 == (ret = __http_get(request, modified, data))) {
+		return 0; // fall back to stale data
+	} else {
+		return ret;
+	}
 }
 
 void http_get(char *request, char *data)
 {
-	__http_get(request, 0, data);
+	if (-1 == __http_get(request, 0, data)) {
+		printk("Error fetching data!\n");
+		
+		strcpy(data, "HTTP/1.0 404 Not Found\nLast-Modified: -\r\nThe server encountered an internal error.");
+	}
 }
 
 
 /** send an HTTP response to the client */
 void kcache_send_response(void *cli_sock, char *data, int len)
-{
-	#define HTTPOK "HTTP/1.0 200 OK Document Follows\r\n";
-	// XXX add HTTP 200 prefix
-
+{	
     ksend(cli_sock, data, len, 0);
 }
 
@@ -120,7 +275,7 @@ void kcache_send_response(void *cli_sock, char *data, int len)
 // TODO error checking (request parsing + allocation
 void get_tag(char *request, char *tag)
 {
-    char *host, *path, *tmp;
+    char *host, *path;
 
     path = kmalloc(512, GFP_KERNEL);
     host = kmalloc(512, GFP_KERNEL);
@@ -129,8 +284,7 @@ void get_tag(char *request, char *tag)
     sscanf(request, "GET %s", path);
 
     // get the host
-    tmp = strstr(request, "Host: ");
-    if (tmp) sscanf(tmp, "Host: %s", host);
+	get_header(request, "Host", host);
 
     strcpy(tag, host);
     strcat(tag, path);
@@ -149,6 +303,7 @@ unsigned int kcache_get_response(char *request, char *data)
 
     tag = kmalloc(1024, GFP_KERNEL);
     get_tag(request, tag);
+	printk("kcache: getting response for tag '%s'\n", tag);
 
 	// general caching logic
 	if ( (entry = cache_locate(tag))) {
@@ -171,7 +326,8 @@ unsigned int kcache_get_response(char *request, char *data)
 		http_get(request, data);
 		cache_write(tag, data);
 	}
-	
+
+//done: // read data from cache
     kfree(tag);
 	return strlen(data);
 }
@@ -182,7 +338,10 @@ void kcache_handle_request(void *sock, char *request)
 	char *buf;
 	unsigned int len;
 
-    buf = kmalloc(2048, GFP_KERNEL);
+    if ( 0 == (buf = kmalloc(MAX_RESPONSE_LEN, GFP_KERNEL))) {
+		printk("unable to allocate memory for response\n");
+		return;
+	}
 
 	len = kcache_get_response(request, buf);
 	kcache_send_response(sock, buf, len);
@@ -265,7 +424,7 @@ int kcache_main(void *arg)
     // accept connections until it kthread_should_stop() tells us not to
 	printk("kcache: listening...\n");
     while ((sockfd_cli = kaccept(sockfd_srv, (struct sockaddr *)&addr_cli, &addr_len)) != NULL) {
-		printk("kcache: received connection...\n");        
+		//printk("kcache: received connection...\n");        
         kthread_run(kcache_handler, sockfd_cli, "kcache_handler");
     }
 
@@ -289,7 +448,7 @@ unsigned int out_hook(unsigned int hooknum, struct sk_buff **sb, const struct ne
     if ((iph->protocol == IPPROTO_TCP)) {
         tcph = get_tcp_hdr(iph);
 		if (ntohs(tcph->dest) == PORT) {
-			printk("kcache: outgoing packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
+			//printk("kcache: outgoing packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 			
 			kcache_mangle_outgoing(iph, tcph);
 		}
@@ -316,7 +475,7 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
     if (iph->protocol == IPPROTO_TCP) {
         tcph = get_tcp_hdr(iph);
 		if (ntohs(tcph->dest) == PORT) {
-			printk("kcache: incoming packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
+			//printk("kcache: incoming packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 			
 			kcache_mangle_incoming(iph, tcph);
 			
@@ -406,10 +565,26 @@ static int __init init(void)
 
 static void __exit cleanup(void)
 {
+    struct list_head *pos, *q;
+    struct cache *tmp;
+
+	// stop main thread
     if (TASK_RUNNING == main_thread->state) send_sig(9, main_thread, 0);
 
+	// unregister netfilter hooks
 	nf_unregister_hook(&netfilter_ops_in);
     nf_unregister_hook(&netfilter_ops_out);
+	
+	// free memory occupied by cache
+    list_for_each_safe(pos, q, &response_cache.list) {
+        tmp = list_entry(pos, struct cache, list);
+        list_del(pos);
+        kfree(tmp->tag);
+        kfree(tmp->modified);
+        kfree(tmp->data);
+        kfree(tmp);
+    }
+
 	
     printk("kcache: module stopped.\n");
 }
