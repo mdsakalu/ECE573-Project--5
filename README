@@ -1,0 +1,21 @@
+ECE 573 - Project 5
+Caching Transparent Proxy
+
+Overview:
+This kernel module is a transparent caching web proxy. Clients who route their traffic through the machine with the module loaded will benefit from it.
+
+Design:
+The module intercepts packets using the netfilter hooks in the kernel. Packets destined for port 80 (web traffic) are instead sent to a ksocket server running on the cache server. This is done by changing the destination address of the packet. The cache either makes the http request on behalf of the client or returns cached data. When data comes back from the cache, the source address is changed to the destination address of the original request.
+
+Parameters:
+/proc/kcache/time - Caching time in sec
+/proc/kcache/size - Cache size in KB
+
+Starting/stopping:
+echo 1|0 > /sys/module/kcache/parameters/start
+
+Notes/Limitations:
+-This module compiles on kernel version 2.6.18 Compatibility with other versions is not guaranteed.
+-A client can only have one active connection through the cache at a time. 
+-You may have to disable TCP checksum offloading. This is important!!!! use the command 'ethtool -K ethX rx off tx off' to disable checksum offloading for whatever interface the cache is listening on.
+

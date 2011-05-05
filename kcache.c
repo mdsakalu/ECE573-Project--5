@@ -398,7 +398,6 @@ void recalc_checksums(struct iphdr *iph, struct tcphdr *tcph, unsigned int len)
 	iph->check = ip_fast_csum((u8 *)iph, iph->ihl);
 	tcph->check = 0;
 	tcph->check = tcp_v4_check(tcph, len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));
-	printk("checksum!\n");
 }
 
 /** munge outgoing port 80 TCP packet's source address */
@@ -524,10 +523,7 @@ unsigned int out_hook(unsigned int hooknum, struct sk_buff **sb, const struct ne
 			printk("kcache: outgoing packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 			
 			kcache_mangle_outgoing(iph, tcph);
-			//printk("kcache: outgoing packet (TCP/port 80) mangled     -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
-			printk("initial ip csum: %x	initial tcp csum: %x\n",ntohs(iph->check), ntohs(tcph->check));
 			recalc_checksums(iph, tcph, skb->len);
-			printk("recalcd ip csum: %x	recalcd tcp csum: %x\n",ntohs(iph->check), ntohs(tcph->check));
 		}
 
     }
@@ -550,7 +546,6 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
     if (iph->protocol == IPPROTO_TCP) {
         tcph = get_tcp_hdr(iph);
 		if (ntohs(tcph->dest) == PORT) {
-			//printk("kcache: incoming packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 			
 			kcache_mangle_incoming(iph, tcph);
 			recalc_checksums(iph, tcph, skb->len);
