@@ -18,4 +18,4 @@ Notes/Limitations:
 -This module compiles on kernel version 2.6.18 Compatibility with other versions is not guaranteed.
 -A client can only have one active connection through the cache at a time. 
 -You may have to disable TCP checksum offloading. This is important!!!! use the command 'ethtool -K ethX rx off tx off' to disable checksum offloading for whatever interface the cache is listening on.
-
+-The response length is limited by a constant in the source code. For debugging purposes it was set to a low value. It can be increased up to the point where kmalloc fails.
