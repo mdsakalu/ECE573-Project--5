@@ -322,22 +322,29 @@ unsigned int kcache_get_response(char *request, char *data)
 
 	// general caching logic
 	if ( (entry = cache_locate(tag))) {
+		printk(" tag is cached\n");
 		if (entry->modified) {
+		printk("  cached data has last modified date set...doing conditional GET\n");
 			modified = http_conditional_get(request, entry->modified, data);
 			if (modified) {
+				printk("   WWW server reports resource is modified...writing new data to cache\n");
 				cache_write(tag, data);
 			} else {
+				printk("   WWW server reports resource is NOT modified...reading data from cache\n");
 				cached_data = cache_read(tag);
 				strcpy(data, cached_data);
 			}
 		} else if (time_since_add(entry) > time) {
+			printk("  cached data does not have last modified date set...and it's expired...GETing new data from WWW server and writing to cache\n");
 			http_get(request, data);
 			cache_write(tag, data);
 		} else {
+			printk("  cache HIT...reading from cache\n");
 			cached_data = cache_read(tag);
 			strcpy(data, cached_data);
 		}
 	} else {
+		printk(" tag is NOT cached\n");
 		http_get(request, data);
 		cache_write(tag, data);
 	}
@@ -408,7 +415,7 @@ void kcache_mangle_outgoing(struct iphdr *iph, struct tcphdr *tcph)
 	//see if this entry is in the table
 	src = src_from_dest(iph->daddr);
 	if(src != 0) {
-		printk("Destination is in table, changing source to %d\n", src);
+		
 		//if it is, change the source address what is in the table
 		iph->saddr = src;
 			
@@ -427,7 +434,7 @@ void kcache_mangle_incoming(struct iphdr *iph, struct tcphdr *tcph)
 	//add (or overwrite) entry in the table
 	add_to_table(dest);
 	
-	printk("Mangling incoming packet, setting destination to localhost. Source is %d", dest.src_ip);
+	
 	/**	adjust the destination address
 		this will make the request go to the caching proxy */
 	iph->daddr = LOCALHOST; //localhost
