@@ -23,7 +23,21 @@
 #define PKT_INFO(iph, tcph) NIPQUAD (iph->saddr), ntohs(tcph->source), NIPQUAD(iph->daddr), ntohs(tcph->dest)
 #define PKT_INFO_FMT "(src: " NIPQUAD_FMT ":%u, dst: " NIPQUAD_FMT ":%u)"
 
-#define PORT 8099
+#define PORT 8072
+//#define LOCALHOST htonl(0x7F000001);
+#define LOCALHOST htonl(0x0A010101);
+#define TABLE_SIZE 1024;
+
+//struct to hold source/destination pairs
+typedef struct {
+	unsigned int dest_ip;
+	unsigned int src_ip;
+	//unsigned short int src_port;
+} address_pair;
+
+static address_pair table;
+//address_pair address_table[TABLE_SIZE];
+//static unsigned int table_index;
 
 static int start = 1;
 module_param(start, int, 0755);
@@ -49,18 +63,74 @@ void kcache_handle_request(void *sock, char *request)
     kfree(buf);
 }
 
+void add_to_table(address_pair dest) {
+	/*unsigned int i;
+	for(i = 0; i < TABLE_SIZE; i++) {
+		if(address_table[i].src_ip == dest.src_ip || address_table[i].src_ip == 0) {
+			address_table[i] = dest;
+			table_index++;
+			break;
+		}
+	}*/
+	table = dest;
+}
+
+unsigned int src_from_dest(unsigned int daddr) {
+	/*unsigned int i;
+	for(i = 0; i < TABLE_SIZE; i++) {
+		if(address_table[i].src_ip == daddr) {
+			return address_table[i].dest_ip;
+		}
+	}
+	return 0;*/
+	
+	if(table.src_ip == daddr) {
+		return table.dest_ip;
+	}
+	
+	return 0;
+}
+
+void recalc_checksums(struct iphdr *iph, struct tcphdr *tcph, unsigned int len)
+{
+	iph->check = 0;
+	iph->check = ip_fast_csum((u8 *)iph, iph->ihl);
+	tcph->check = 0;
+	tcph->check = tcp_v4_check(tcph, len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));
+	printk("checksum!\n");
+}
+
 /** munge outgoing port 80 TCP packet's source address */
 void kcache_mangle_outgoing(struct iphdr *iph, struct tcphdr *tcph)
 {
-	// XXX
+	unsigned int src;
+	printk("Mangling outgoing packet. ");
+	//see if this entry is in the table
+	src = src_from_dest(iph->daddr);
+	if(src != 0) {
+		printk("Destination is in table, changing source to %d\n", src);
+		//if it is, change the source address what is in the table
+		iph->saddr = src;
+			
+	}
 }
 
-/** munge incoming port 80 TCP packet's destination address */
+/** munge incoming port 80 TCP packet's destination address*/
 void kcache_mangle_incoming(struct iphdr *iph, struct tcphdr *tcph)
 {
-	// XXX
-
-	//iph->daddr = htonl(0x7F000001);
+	address_pair dest;
+	
+	//get destination  and source addresses
+	dest.src_ip = iph->saddr;
+	dest.dest_ip = iph->daddr;
+	
+	//add (or overwrite) entry in the table
+	add_to_table(dest);
+	
+	printk("Mangling incoming packet, setting destination to localhost. Source is %d", dest.src_ip);
+	/**	adjust the destination address
+		this will make the request go to the caching proxy */
+	iph->daddr = LOCALHOST; //localhost
 }
 
 struct tcphdr* get_tcp_hdr(struct iphdr *iph)
@@ -141,20 +211,27 @@ unsigned int out_hook(unsigned int hooknum, struct sk_buff **sb, const struct ne
     struct iphdr *iph;
     struct tcphdr *tcph;
 	
+	//printk("out_hook called\n");
 	if (!start) return NF_ACCEPT;
 
     if (!skb) return NF_ACCEPT;
     if (! (iph = ip_hdr(skb))) return NF_ACCEPT;
-
+	
     if ((iph->protocol == IPPROTO_TCP)) {
         tcph = get_tcp_hdr(iph);
-		if (ntohs(tcph->dest) == PORT) {
+		if (ntohs(tcph->source) == PORT) {
 			printk("kcache: outgoing packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 			
 			kcache_mangle_outgoing(iph, tcph);
+			//printk("kcache: outgoing packet (TCP/port 80) mangled     -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
+			printk("initial ip csum: %x	initial tcp csum: %x\n",ntohs(iph->check), ntohs(tcph->check));
+			recalc_checksums(iph, tcph, skb->len);
+			recalc_checksums(iph, tcph, skb->len);
+			printk("recalcd ip csum: %x	recalcd tcp csum: %x\n",ntohs(iph->check), ntohs(tcph->check));
 		}
+
     }
-    
+	
     return NF_ACCEPT;
 }
 
@@ -163,32 +240,24 @@ unsigned int in_hook(unsigned int hooknum, struct sk_buff **sb, const struct net
 {
     struct sk_buff *skb = *sb;
 	struct iphdr *iph;
-	struct tcphdr *tcph;
-	unsigned int len;
+	struct tcphdr *tcph;	
 	
+	//printk("in_hook called\n");
 	if (!start) return NF_ACCEPT;
-	
 	if (!skb) return NF_ACCEPT;
-
 	iph = ip_hdr(skb);
     if (! (iph = ip_hdr(skb))) return NF_ACCEPT;
-
     if (iph->protocol == IPPROTO_TCP) {
         tcph = get_tcp_hdr(iph);
 		if (ntohs(tcph->dest) == PORT) {
 			printk("kcache: incoming packet (TCP/port 80) intercepted -> " PKT_INFO_FMT ".\n", PKT_INFO(iph, tcph));
 			
 			kcache_mangle_incoming(iph, tcph);
-			
-			// re-calculate checksums, as packet changed
-			iph->check = 0;
-			iph->check = ip_fast_csum((u8 *)iph, iph->ihl); 
-			len = skb->len;
-			tcph->check = 0;
-			tcph->check = tcp_v4_check(tcph, len-4*iph->ihl, iph->saddr, iph->daddr, csum_partial((char *)tcph, len-4*iph->ihl, 0));
+			recalc_checksums(iph, tcph, skb->len);
 		}
-	}
 
+		
+	}
 	return NF_ACCEPT;
 }
 
@@ -231,9 +300,15 @@ int time_read(char* page, char** start, off_t off, int count, int* eof, void* da
 static int __init init(void)
 {
     struct proc_dir_entry *kcache_dir, *time, *size;
-	
+	//unsigned int i;
     printk("kcache: module started.\n");
-
+	
+	/*for(i = 0; i < TABLE_SIZE; i++) {
+		address_table[i].src_ip = 0;
+		address_table[i].dest_ip = 0;
+	}
+	table_index = 0;*/
+	
     kcache_dir = proc_mkdir("kcache", NULL);
 
     time = create_proc_entry("time", 0755, kcache_dir);
